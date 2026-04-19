@@ -73,9 +73,9 @@ sequenceDiagram
     C->>C: validate + lock_request(sign_id)
     C->>RT: env::promise_yield_create(...)
     RT-->>C: data_id
-    C->>C: set_request_yield(sign_id → data_id)
+    C->>C: set_request_yield(sign_id -> data_id)
     C->>RT: env::promise_return(yield_promise)
-    Note over U,RT: caller's tx waits;<br/>Promise parked in state tree
+    Note over U,RT: caller's tx waits,<br/>Promise parked in state tree
     Note over IDX: poll pending_requests_data()
     IDX->>NET: enqueue IndexedSignRequest
     NET->>NET: threshold ECDSA
@@ -108,7 +108,7 @@ sequenceDiagram
     NET->>NET: threshold ECDSA<br/>signs serialized_tx
     PR->>DC: broadcast signed tx<br/>(to caip2_id chain)
     DC->>DC: execute
-    DC-->>PR: execution result → serialized_output
+    DC-->>PR: execution result -> serialized_output
     PR->>OC: respond_bidirectional(request_id,<br/>serialized_output, signature)
     OC->>OC: emit RespondBidirectionalEvent
     OC-->>U: (optional) CPI callback<br/>to program_id [UNVERIFIED]
