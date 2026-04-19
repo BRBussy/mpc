@@ -22,6 +22,7 @@ Skim [§1 TL;DR](01-tldr.md) and [§2 Architecture](02-architecture.md) first. W
 8. [Experiments](08-experiments.md) — 8 structured experiments (3 reading, 5 hands-on).
 9. [Glossary](09-glossary.md) — terms whose meaning in this codebase differs from public usage.
 10. [Potential risks](10-potential-risks.md) — liveness, delivery guarantees, and the proposer-single-point-of-failure. Mandatory reading before writing SDK contracts with user funds.
+11. [Funds & refunds](11-funds-and-refunds.md) — who pays, who holds the deposit in flight, and who gets a refund on each outcome per chain.
 
 ## Further reading in this repo
 

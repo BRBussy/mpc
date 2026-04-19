@@ -1,6 +1,6 @@
 # §10 — Potential risks
 
-[← §9 Glossary](09-glossary.md) · [Index](README.md)
+[← §9 Glossary](09-glossary.md) · [Index](README.md) · Next: [§11 Funds & refunds →](11-funds-and-refunds.md)
 
 ---
 
@@ -188,7 +188,7 @@ Integration tests spin up Redis via docker with no persistence flags ([integrati
 |---|---|---|
 | NEAR | Yield times out (~200 blocks ≈ 4 min), **full deposit refunded** via `refund_on_fail` ([contract/src/lib.rs:812-817](../../chain-signatures/contract/src/lib.rs#L812-L817), [:833-856](../../chain-signatures/contract/src/lib.rs#L833-L856)). User's `sign()` call returns `SignError::Timeout`. | N/A — NEAR doesn't have bidirectional. |
 | Ethereum | Deposit stays in contract balance, admin-withdrawable ([ChainSignatures.sol:181-195](../../chain-signatures/contract-eth/contracts/ChainSignatures.sol#L181-L195)). `respondError` event can be emitted by the network ([ChainSignatures.sol:148-156](../../chain-signatures/contract-eth/contracts/ChainSignatures.sol#L148-L156)) but is not auto-emitted on proposer failure. Listener hangs indefinitely. | N/A — Ethereum doesn't have bidirectional. |
-| Solana | Deposit field exists but `[UNVERIFIED]` enforcement in current minimal contract. No explicit refund path. | Same as standard, plus destination-chain gas paid by the node's own account `[UNVERIFIED]`. |
+| Solana | **No deposit is transferred** at all — the `signature_deposit` field in `ProgramState` is echoed into the event but not enforced ([contract-sol/src/lib.rs:63-87](../../chain-signatures/contract-sol/src/lib.rs#L63-L87)). Nothing to refund because nothing was paid. See [§11](11-funds-and-refunds.md). | Same non-enforcement. Destination-chain gas is paid by the MPC node's own keypair `[UNVERIFIED]`, which means *the network* absorbs the cost of a failed bidirectional from an economic perspective — not the user. |
 | Hydration | `[UNVERIFIED]` — pallet is outside this repo. | Same. |
 
 ## 10.10 Is this overblown? An honest take
@@ -249,4 +249,4 @@ When you write SDK docs:
 
 ---
 
-[← §9 Glossary](09-glossary.md) · [Index](README.md)
+[← §9 Glossary](09-glossary.md) · [Index](README.md) · Next: [§11 Funds & refunds →](11-funds-and-refunds.md)
