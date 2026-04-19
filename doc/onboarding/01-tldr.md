@@ -14,7 +14,7 @@ A user "account" on any secp256k1 chain is a **derived public key** of `root_pk 
 2. **Contract emits `SignatureRequested`** (as an event/log/CPI/substrate event — chain-specific shape, same semantic fields).
 3. **MPC nodes' per-chain indexers observe the event**, normalize it into an internal `IndexedSignRequest`, validate it, and enqueue it for the signature pipeline.
 4. **Threshold ECDSA runs.** One node (the "proposer") drives the protocol; `threshold` nodes must participate. This consumes one pre-generated "pre-signature" (itself built from pre-generated "triples").
-5. **The proposer calls `respond(request_id, signature)`** back on-chain. This either (a) emits `SignatureResponded` for the caller to observe, or (b) on NEAR, wakes the caller's yielded Promise so the signature is returned as a normal function result.
+5. **The proposer calls `respond(request_id, signature)`** back on-chain. This either (a) emits `SignatureResponded` for the caller to observe, or (b) on NEAR, resumes an on-chain **yielded Promise** (NEP-519, a NEAR-runtime primitive — not an SDK abstraction) so the signature is returned as the normal return value of the original `sign()` call. See [§4.2](04-event-flow.md#nears-on-chain-yieldresume-primitive-nep-519) for how that actually works.
 
 ## Important consequences of this design
 

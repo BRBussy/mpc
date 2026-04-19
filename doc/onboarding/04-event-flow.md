@@ -68,7 +68,20 @@ Two distinct things share the word; don't conflate them:
 
 **For your SDK work**: treat `sign_bidirectional` as an experimental/optional feature. The mainline integration surface is plain `sign()` + event listening.
 
-**NEAR's "callback" is different again**: [contract/src/lib.rs:128-189](../../chain-signatures/contract/src/lib.rs#L128-L189) uses `promise_yield_create` + `promise_yield_resume` to make `sign()` look like a synchronous function call to the caller. This is **not** a callback to a third contract — it's just NEAR's mechanism for returning an async result on the same Promise chain ([contract/src/lib.rs:290](../../chain-signatures/contract/src/lib.rs#L290) is where `respond` resumes the yield).
+### NEAR's on-chain yield/resume primitive (NEP-519)
+
+**NEAR's "callback" is different again** — and this is a detail worth internalizing, because it is *not* SDK magic. NEAR's runtime itself exposes host functions that let a contract **park a Promise on-chain** and have some later transaction resume it. It's specified in [NEP-519 "Yield Execution"](https://github.com/near/NEPs/blob/master/neps/nep-0519.md) and the calls are part of the NEAR VM ABI, not the `near-sdk` crate.
+
+Mechanically, from [contract/src/lib.rs:762-794](../../chain-signatures/contract/src/lib.rs#L762-L794):
+
+1. User's tx calls `sign(...)`. The contract invokes **`env::promise_yield_create(...)`** — a host function. This returns a Promise pointing at callback `clear_state_on_finish` and writes a 32-byte `data_id` into a register.
+2. The contract persists `data_id` keyed by `sign_id` ([lib.rs:780](../../chain-signatures/contract/src/lib.rs#L780) `self.set_request_yield(...)`).
+3. The contract chains a second callback `return_signature_on_finish` via `promise_then` and calls `env::promise_return(final_yield_promise)` — telling the runtime "my return value is this pending Promise."
+4. NEAR's runtime parks the Promise in the state tree. The caller's tx waits on it, subject to a runtime-enforced yield timeout `[UNVERIFIED]` for this contract; NEP-519's default is 200 blocks.
+5. Later, an MPC node calls `respond(sign_id, signature)`. That function at [contract/src/lib.rs:290](../../chain-signatures/contract/src/lib.rs#L290) invokes **`env::promise_yield_resume(&data_id, &serialized_signature)`**. The parked Promise wakes; `return_signature_on_finish` ([lib.rs:799-810](../../chain-signatures/contract/src/lib.rs#L799-L810)) receives the signature as a callback arg and returns it.
+6. The original caller's `sign(...)` tx resolves with the signature as its ordinary return value.
+
+This is **not** a callback to a third contract, and there is no SDK-side polling. From any caller — JS client, Rust client, another NEAR contract cross-contract-calling — `sign(...)` looks like an ordinary function that "takes a few seconds to return."
 
 ## 4.3 Request validation — what gates a request before nodes participate
 
