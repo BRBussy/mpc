@@ -8,23 +8,42 @@ This is the hands-on spine. Everything else in the guide is background for this 
 
 ## 6.1 Prereqs
 
-From [integration-tests/README.md:5-11](../../integration-tests/README.md#L5-L11):
+**Docker** running (Docker Desktop on macOS/Windows, Docker Engine on Linux). Pull the Redis image ahead of time:
 
 ```bash
 docker pull redis:7.4.2
 ```
 
-On macOS you may need to symlink the docker socket:
+That's it for most setups. The integration-test harness talks to Docker via [bollard](https://docs.rs/bollard) and already handles the two common socket locations itself — see [containers.rs:311-337](../../integration-tests/src/containers.rs#L311-L337):
 
-```bash
-sudo ln -s $HOME/.docker/run/docker.sock /var/run/docker.sock
+```rust
+let docker = match bollard::Docker::connect_with_defaults() {
+    Ok(docker) => docker,
+    Err(default_err) => {
+        // fall back to Docker Desktop socket path
+        let home_socket = format!("unix://{home}/.docker/run/docker.sock");
+        bollard::Docker::connect_with_unix(&home_socket, timeout, api_version)
+        ...
+    }
+};
 ```
 
-Solana integration tests require `solana-test-validator` installed locally (not a docker container) — [containers.rs ~lines 595-700](../../integration-tests/src/containers.rs).
+`connect_with_defaults` tries `DOCKER_HOST` (if set), then `/var/run/docker.sock` on Unix. If that fails, it retries at `~/.docker/run/docker.sock` — which is where Docker Desktop ≥4.13 actually puts its socket on macOS. So **on macOS with modern Docker Desktop, no socket setup is needed**; on Linux, the socket is already at `/var/run/docker.sock` natively. The `sudo ln -s ... /var/run/docker.sock` workaround mentioned in [integration-tests/README.md:128-133](../../integration-tests/README.md#L128-L133) only applies if you run into the "No such file or directory (os error 2)" error, which typically means:
 
-`[UNVERIFIED]` Ethereum tests require Foundry's `anvil` available either as the docker image `ghcr.io/foundry-rs/foundry:nightly` or locally.
+- Docker Desktop isn't running, or
+- You have an unusual `DOCKER_HOST` env var set that points somewhere else, or
+- You're on an older Docker Desktop that didn't even provide `~/.docker/run/docker.sock`, or
+- You're using a third-party tool (not bollard) that hardcodes `/var/run/docker.sock` and you can enable the "Allow the default Docker socket to be used" checkbox in Docker Desktop → Settings → Advanced as a cleaner alternative to the symlink.
 
-Rust toolchain: as pinned by `rust-toolchain.toml` / the workspace. Run `./setup.sh` if unsure.
+Try running without the symlink first. If it works, skip that step.
+
+**Chain-specific extras:**
+
+- **Solana**: requires `solana-test-validator` installed **locally** (not a docker container) — [containers.rs:595-700](../../integration-tests/src/containers.rs) spawns it as a native subprocess. Install via the [Solana CLI tools](https://solana.com/docs/intro/installation).
+- **Ethereum** (when `--eth-*` flags are used or `use_ethereum` is set): requires Foundry's `anvil`. The harness uses either the `ghcr.io/foundry-rs/foundry:nightly` docker image or a local install `[UNVERIFIED]` which it actually uses in what mode.
+- **NEAR**: comes "free" — the harness pulls `near/sandbox:latest` via the `near-workspaces` crate. No manual install.
+
+**Rust toolchain**: as pinned by `rust-toolchain.toml` / the workspace. Run `./setup.sh` if unsure.
 
 ## 6.2 Option A — full cluster with one command
 
@@ -33,17 +52,102 @@ cd integration-tests
 cargo run -- setup-env --nodes 3 --threshold 2
 ```
 
-What you get ([integration-tests/src/main.rs:54-116](../../integration-tests/src/main.rs#L54-L116)):
+### There is no `setup-env` config file
 
-- Docker bridge network named `mpc_it_network` (or per-instance `[UNVERIFIED]`).
-- `redis:7.4.2` container.
-- NEAR sandbox (`near-workspaces` spawns the `ghcr.io/near/sandbox:latest` image).
-- 3 MPC nodes on docker, each listening on port 3000 in-container (mapped to a random host port).
-- Deployed MPC contract on the sandbox with pre-generated key material baked in via [integration-tests/src/mpc_fixture/3_nodes_2_threshold.json](../../integration-tests/src/mpc_fixture/3_nodes_2_threshold.json). This shortcut shaves ~20s of key-gen off every boot ([cluster/spawner.rs:26-103](../../integration-tests/src/cluster/spawner.rs#L26-L103) `[UNVERIFIED]`).
+That threw me at first too. `setup-env` is a **Rust-defined subcommand**, not a config file. If you grep for `setup-env` or `setup_env` you'll find the actual source of truth is the `Cli` enum at [integration-tests/src/main.rs:17-47](../../integration-tests/src/main.rs#L17-L47):
 
-The process prints node URLs, NEAR account IDs, secret keys, public keys, and then blocks on Ctrl-C. Leave it running.
+```rust
+#[derive(Parser, Debug)]
+enum Cli {
+    SetupEnv {
+        #[arg(short, long, default_value_t = 3)]
+        nodes: usize,
+        #[arg(short, long, default_value_t = 2)]
+        threshold: usize,
+        #[arg(long, default_value = "http://localhost:8545")]
+        eth_consensus_rpc_http_url: String,
+        ...
+    },
+    DepServices,
+    ContractCommands,
+}
+```
 
-**To add Ethereum**: [integration-tests/src/main.rs:26-42](../../integration-tests/src/main.rs#L26-L42) already accepts eth flags; pass `--eth-execution-rpc-http-url http://localhost:8545` etc. and run your own anvil. Same idea with Solana — pass `--sol-*` flags `[UNVERIFIED]` (flags exist in node cli; confirm they're threaded through `setup-env` before relying on them).
+All flag defaults are hardcoded in the clap annotations. All cluster settings that aren't exposed as flags (network name, GCP project id, env label, binary path) are hardcoded in [cluster/spawner.rs:18-20](../../integration-tests/src/cluster/spawner.rs#L18-L20):
+
+```rust
+const DOCKER_NETWORK: &str = "mpc_it_network";
+const GCP_PROJECT_ID: &str = "multichain-integration";
+const ENV: &str = "integration-tests";
+```
+
+To change these, edit the source and recompile. There's no YAML / TOML / `.env` for the harness.
+
+### What actually runs when you execute the command
+
+Tracing end-to-end from `cargo run` to "cluster up":
+
+**1. Cargo compiles and runs the `integration-tests` binary** against the local workspace. The `-- setup-env --nodes 3 --threshold 2` after the `--` is passed to the binary as argv.
+
+**2. [main.rs:53-116](../../integration-tests/src/main.rs#L53-L116) parses args, builds a `NodeConfig`** with `nodes=3, threshold=2`, attaches an `EthConfig` (from the `--eth-*` flags, which have defaults so they're always present), and constructs a `ClusterSpawner::default()`.
+
+**3. `ClusterSpawner::default()` at [spawner.rs:134-168](../../integration-tests/src/cluster/spawner.rs#L134-L168)** sets up:
+- A `DockerClient` (the bollard connection described in §6.1).
+- `release: true` — use the release-mode binary at `target/release/mpc-node`.
+- `wait_for_running: true`.
+- Docker network name: `mpc_it_network`.
+- GCP project id: `multichain-integration` (used only as a string label; no real GCP calls).
+- Pre-stockpile: generate 4× the normal triple count (so tests don't stall on stockpile warm-up).
+- **Pregenerated keys loaded from [mpc_fixture/3_nodes_2_threshold.json](../../integration-tests/src/mpc_fixture/3_nodes_2_threshold.json)** if the (nodes, threshold) tuple matches a known fixture. For `(3, 2)` and `(5, 4)` this skips ~20s of live key-generation protocol and starts nodes directly in the `Running` state. For any other tuple you fall through to full keygen.
+
+**4. `.init_network()` creates the docker bridge network** `mpc_it_network` (via bollard).
+
+**5. `.run()` branches on cargo feature `docker-test`:**
+
+| Feature flag | Mode | Nodes run as | Called function |
+|---|---|---|---|
+| *(default)* | `host` | **native processes on your machine** | [lib.rs:573-664](../../integration-tests/src/lib.rs#L573-L664) |
+| `--features docker-test` | `docker` | docker containers | [lib.rs:450-522](../../integration-tests/src/lib.rs#L450-L522) |
+
+`setup-env` uses the default (`host`). That means the nodes are plain binaries running on your host, **not** docker containers, even though their dependencies (Redis, NEAR sandbox) are containerised. This is faster to iterate on.
+
+**6. `setup(spawner)` at [lib.rs:329-448](../../integration-tests/src/lib.rs#L329-L448) builds the infra stack** in order:
+
+1. **NEAR sandbox** — `near_workspaces::sandbox().await` spawns the `near/sandbox:latest` docker image. Exposes a JSON-RPC endpoint on a random host port.
+2. **Creates N NEAR accounts on sandbox** (one per MPC node) — funded from the dev account.
+3. **Deploys the compiled MPC contract WASM** from `target/wasm32-unknown-unknown/release/mpc_contract.wasm` via `worker.dev_deploy()`. That's the contract at [chain-signatures/contract/](../../chain-signatures/contract/). You need to have built it before running (use `./build-contract.sh`) — otherwise this step fails with a missing-file error.
+4. **Redis container** — `redis:7.4.2`. Exposes port 6379 on a random host port.
+5. **If `use_ethereum`** — spawns `EthereumSandbox` (anvil) and deploys `ChainSignatures.sol` via ethers-rs.
+6. **If `cfg.sol` is set** — spawns `solana-test-validator` as a native subprocess, deploys the Solana program from `chain-signatures/contract-sol/artifacts/chain_signatures.so`.
+7. **Creates `target/tmp/secrets/`** — this is where each node's secret key share will be written (plain file, not GCP Secret Manager).
+8. **If pregenerated keys are enabled** ([lib.rs:407-433](../../integration-tests/src/lib.rs#L407-L433)) — writes each participant's key share into their `secret_storage` before the node boots, so they come up in `Running` state immediately.
+
+**7. `host(spawner)` at [lib.rs:573-664](../../integration-tests/src/lib.rs#L573-L664) spawns the MPC node processes**, one per account, in parallel. Each node is invoked as the `mpc-node start ...` binary (the same CLI from [cli.rs](../../chain-signatures/node/src/cli.rs)) with env vars set to point at the sandbox RPC, the Redis URL, the local secret path, the web port, etc.
+
+**8. Back in `host()`: register all nodes as participants** on the MPC contract via a `init_running` call (skips keygen, uses the pregenerated public key) or `init` (triggers keygen).
+
+**9. Back in `main()`: print a summary** of URLs, account IDs, secret keys, public keys for each node, and the sandbox/Redis addresses ([main.rs:93-111](../../integration-tests/src/main.rs#L93-L111)).
+
+**10. Block on `signal::ctrl_c()`** ([main.rs:113](../../integration-tests/src/main.rs#L113)). The cluster stays up until you Ctrl-C.
+
+### Net result
+
+You get, all running on your host:
+
+- Docker: `mpc_it_network` bridge, `redis:7.4.2` container, `near/sandbox:latest` container, plus anvil/solana-test-validator if enabled.
+- Host processes: 3× `mpc-node` binaries.
+- NEAR contract deployed on the sandbox with 3 participants registered and threshold 2.
+- ~0 key-generation wait time (pregenerated fixture).
+
+Approximate boot time on a warm Docker cache: 15–30 seconds. First-time boot on a cold machine (pulling images, building the binary release profile) can be 5+ minutes.
+
+### Changing behaviour
+
+- **Different node count / threshold** → pass `--nodes N --threshold T`. If N/T doesn't match a pregenerated fixture (today: 3/2 or 5/4), you fall through to live key generation which adds ~20s to boot.
+- **Enable Ethereum indexer** → the `--eth-*` flags are already populated via defaults and always attached to the `EthConfig` in [main.rs:69-79](../../integration-tests/src/main.rs#L69-L79), so the Eth indexer is always *configured* — but whether it actually reaches an Ethereum node depends on whether you've got anvil at `http://localhost:8545`. Run anvil separately or set `--eth-execution-rpc-http-url` to a real endpoint.
+- **Enable Solana indexer** → the `setup-env` subcommand at [main.rs:20-42](../../integration-tests/src/main.rs#L20-L42) currently does **not** expose `--sol-*` flags, so Solana is off by default from this entry point `[UNVERIFIED]`. To enable it you'd either add flags here or use the `ClusterSpawner` builder API from a Rust test. Confirm before relying on it.
+- **Run nodes as docker containers** → `cargo run --features docker-test -- setup-env ...`.
+- **Skip the MPC nodes, keep only dependencies** → use `cargo run -- dep-services` instead, see §6.3.
 
 ## 6.3 Option B — dep services only (BYO node)
 
