@@ -43,7 +43,28 @@ Try running without the symlink first. If it works, skip that step.
 - **Ethereum** (when `--eth-*` flags are used or `use_ethereum` is set): requires Foundry's `anvil`. The harness uses either the `ghcr.io/foundry-rs/foundry:nightly` docker image or a local install `[UNVERIFIED]` which it actually uses in what mode.
 - **NEAR**: comes "free" — the harness pulls `near/sandbox:latest` via the `near-workspaces` crate. No manual install.
 
-**Rust toolchain**: as pinned by `rust-toolchain.toml` / the workspace. Run `./setup.sh` if unsure.
+**Rust toolchain**: as pinned by `rust-toolchain.toml` / the workspace, **plus** a Rust `1.81.0` channel installed via rustup — [build-contract.sh](../../build-contract.sh) uses `cargo +1.81.0` to build the NEAR contract WASM. Install with `rustup install 1.81.0` if you don't have it.
+
+### `./setup.sh` — the cargo runner that prebuilds everything
+
+You don't run this directly. It's wired in as a cargo runner via [.cargo/config.toml](../../.cargo/config.toml):
+
+```toml
+[target.'cfg(not(target = "wasm32-unknown-unknown"))']
+runner = "./setup.sh"
+```
+
+Every `cargo run -p integration-tests ...` or `cargo test -p integration-tests ...` invocation becomes `./setup.sh <binary-path> <args...>`. The runner ([setup.sh:11-44](../../setup.sh)) then:
+
+1. Builds the NEAR contract WASM via `./build-contract.sh` (cargo 1.81.0 → `target/wasm32-unknown-unknown/release/mpc_contract.wasm`).
+2. Builds the node binary via `cargo build -p mpc-node --release --features test-feature,debug-page` (→ `target/release/mpc-node`).
+3. Execs the integration-tests binary.
+
+**Env-var knobs:**
+- `MPC_SETUP_SKIP=1` — skip the prebuild entirely. Useful when you know the binaries are already fresh and want faster iteration.
+- `MPC_SETUP_ALWAYS=1` — run the prebuild even for non-integration-tests cargo invocations.
+
+The prebuild only runs when `CARGO_PKG_NAME=integration-tests`, so other cargo invocations skip it by default.
 
 ## 6.2 Option A — full cluster with one command
 
@@ -115,7 +136,7 @@ Tracing end-to-end from `cargo run` to "cluster up":
 
 1. **NEAR sandbox** — `near_workspaces::sandbox().await` spawns the `near/sandbox:latest` docker image. Exposes a JSON-RPC endpoint on a random host port.
 2. **Creates N NEAR accounts on sandbox** (one per MPC node) — funded from the dev account.
-3. **Deploys the compiled MPC contract WASM** from `target/wasm32-unknown-unknown/release/mpc_contract.wasm` via `worker.dev_deploy()`. That's the contract at [chain-signatures/contract/](../../chain-signatures/contract/). You need to have built it before running (use `./build-contract.sh`) — otherwise this step fails with a missing-file error.
+3. **Deploys the compiled MPC contract WASM** from `target/wasm32-unknown-unknown/release/mpc_contract.wasm` via `worker.dev_deploy()`. That's the contract at [chain-signatures/contract/](../../chain-signatures/contract/). **The WASM is built automatically** by the cargo runner `./setup.sh` (see §6.1) before your binary starts — no manual prebuild step needed. If you're running with `MPC_SETUP_SKIP=1` you must have built it yourself via `./build-contract.sh` or this step fails with a missing-file error.
 4. **Redis container** — `redis:7.4.2`. Exposes port 6379 on a random host port.
 5. **If `use_ethereum`** — spawns `EthereumSandbox` (anvil) and deploys `ChainSignatures.sol` via ethers-rs.
 6. **If `cfg.sol` is set** — spawns `solana-test-validator` as a native subprocess, deploys the Solana program from `chain-signatures/contract-sol/artifacts/chain_signatures.so`.
