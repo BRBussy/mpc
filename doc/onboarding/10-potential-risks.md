@@ -18,6 +18,7 @@ Sig.Network MPC is a **non-Byzantine, non-crypto-economic** threshold-signing ne
 - ✗ **No indexer catchup** on Solana — silent data loss during any node downtime ([§10.6](#106-indexer-delivery-guarantees--what-survives-a-crash)).
 - ✗ **Computed signatures live only in proposer RAM** — never persisted ([§10.7](#107-the-computed-signature-in-ram-gap)).
 - ✗ **Redis is a per-node single point of failure** and `[UNVERIFIED]` whether persistence (AOF/RDB) is configured in production ([§10.8](#108-redis-as-single-point-of-failure)).
+- ✗ **Bidirectional responses don't actually invoke the caller contract** — the `program_id` metadata goes unused; origin-side dApps must still run off-chain listeners, unlike message-passing bridges ([§10.9](#109-bidirectional-responses-dont-actually-invoke-the-caller)).
 
 The security model is "trust the whitelisted operator set to behave reasonably" — similar in spirit to federated / permissioned validator sets. It's explicitly stated in [doc/mpc_node_specification.md:40-42](../mpc_node_specification.md):
 
@@ -182,7 +183,65 @@ Integration tests spin up Redis via docker with no persistence flags ([integrati
 - A **single node's** Redis loss: that node becomes partially blind until other nodes' indexers pick up the slack — but the "slack" only covers network-level consensus, not this specific node's pending backlog. Sign requests where this node was the proposer get re-proposed (eventually) by a different node.
 - **Multiple nodes'** Redis loss simultaneously (e.g. shared infra outage): potentially catastrophic — triples/presignatures are consumed by threshold protocols and must be regenerated network-wide before signatures can resume. Triple generation takes ~30s in the best case ([doc/ARCHITECTURE.md:46](../ARCHITECTURE.md)), so throughput collapses until the stockpile refills.
 
-## 10.9 What happens to the user's deposit on failure
+## 10.9 Bidirectional responses don't actually invoke the caller
+
+Flow C's `program_id` parameter looks like it identifies a caller contract to invoke with the result. It doesn't. The current `respond_bidirectional` implementation is an **event-only response**, not a real cross-chain invocation. This is arguably the most significant product-level gap in the current design.
+
+### What the code does
+
+The whole body of Solana `respond_bidirectional` ([contract-sol/src/lib.rs:43-61](../../chain-signatures/contract-sol/src/lib.rs#L43-L61)):
+
+```rust
+emit!(RespondBidirectionalEvent {
+    request_id,
+    responder: *ctx.accounts.responder.key,
+    serialized_output,
+    signature,
+});
+Ok(())
+```
+
+The `program_id` supplied in the original `sign_bidirectional` call is **nowhere in sight here**. The accounts struct ([contract-sol/src/lib.rs:163-166](../../chain-signatures/contract-sol/src/lib.rs#L163-L166)) contains only `responder: Signer` — no account slot for the caller program, no `AccountInfo` for CPI, no `invoke` / `invoke_signed`. Hydration's pallet-side `respond_bidirectional` is `[UNVERIFIED]` but the structural problem is visible from the `ChainEvent::RespondBidirectional` wire shape ([stream/mod.rs](../../chain-signatures/node/src/stream/mod.rs) — carries only output + signature, no caller-program dispatch).
+
+**Net effect:** the origin-chain dApp that initiated the flow must run its own off-chain indexer to detect `RespondBidirectionalEvent` matching its `request_id`, parse the output, and decide what to do next. The result doesn't arrive on-chain in a form the caller's contract can act on atomically with delivery.
+
+### How this differs from real cross-chain messaging bridges
+
+- **LayerZero, Wormhole, IBC, Axelar, Hyperlane** all deliver messages *into* the destination contract via direct invocation (CPI on Solana, `call` on EVM, IBC module dispatch). The destination contract wakes up synchronously in the same tx that delivered the message. Application logic executes atomically with delivery.
+- **Sig.Network `respond_bidirectional` today** emits an event and calls it done. The intended destination contract is never invoked. Every consumer builds and operates their own event-listener infrastructure off-chain — the same work a plain-`sign()` consumer does.
+
+For the common "call my contract with the result of this cross-chain operation" dApp pattern, this is materially less useful than message-passing bridges.
+
+### Unique value that remains
+
+The one property Sig.Network does retain here is genuine: **the network signs the destination-chain tx itself**, which means the caller controls a derived account with real value on the destination chain — not just a trusted message. That's a different (and arguably stronger) primitive than message passing for flows that move value. And the signature emitted with `RespondBidirectionalEvent` is cryptographically verifiable against the root key, so a caller who reads the event off-chain and then pushes it back into its own contract in a follow-up tx can verify the output is authentic without trusting the relayer.
+
+But **neither of those properties close the "true cross-chain invocation" gap**. They're orthogonal value.
+
+### Product-market-fit implication
+
+If the network's pitch includes "cross-chain execute in one call," the current bidirectional flow under-delivers. A dApp using bidirectional today is composed of:
+
+1. A `sign_bidirectional` call on origin.
+2. A self-operated indexer on origin watching `RespondBidirectionalEvent` for matching `request_id`.
+3. Usually: a follow-up tx into the dApp's contract with the parsed output.
+
+Steps 2–3 are what a plain `sign()` consumer already has to do. The "bidirectional" affordance buys the dApp a pre-executed destination-chain tx (useful) but does not buy them an on-chain wake-up path on the origin. This is likely a meaningful obstacle to competing with general-purpose message-passing bridges on the dApp experience axis, even though Sig.Network's value in the signatures-on-other-chains axis is genuinely unique.
+
+### What a real invocation path would look like
+
+To make Solana `respond_bidirectional` a true cross-chain invocation:
+
+1. The handler takes an additional account — the caller program identified by `program_id` from the original request.
+2. The handler constructs an `Instruction` for that program with `(request_id, serialized_output, signature)` in data.
+3. `invoke_signed` CPIs into a standardised handler on the caller program (e.g. `on_mpc_response`).
+4. Caller's handler verifies the signature against the known root public key (derivable from an on-chain registry, or via the Solana secp256k1 precompile) and executes application logic atomically.
+
+This is a meaningful design change, not a one-line fix — the destination-program interface has to be standardised, signature verification needs to happen on-chain (Solana `Secp256k1Program`), caller programs need to be pre-registered for dispatch, gas/compute accounting changes, and failure semantics of the CPI have to be thought through. But the shape is well-trodden: LayerZero's `lzReceive`, Wormhole's `receiveMessage`, Hyperlane's `handle` — every competing bridge has solved this problem. There's a path.
+
+Until it's walked, treat bidirectional as "threshold-signed cross-chain execute with event-only response," not as a full cross-chain call primitive.
+
+## 10.10 What happens to the user's deposit on failure
 
 | Chain | Standard flow | Bidirectional flow |
 |---|---|---|
@@ -191,7 +250,7 @@ Integration tests spin up Redis via docker with no persistence flags ([integrati
 | Solana | **No deposit is transferred** at all — the `signature_deposit` field in `ProgramState` is echoed into the event but not enforced ([contract-sol/src/lib.rs:63-87](../../chain-signatures/contract-sol/src/lib.rs#L63-L87)). Nothing to refund because nothing was paid. See [§11](11-funds-and-refunds.md). | Same non-enforcement. Destination-chain gas is paid by the MPC node's own keypair `[UNVERIFIED]`, which means *the network* absorbs the cost of a failed bidirectional from an economic perspective — not the user. |
 | Hydration | `[UNVERIFIED]` — pallet is outside this repo. | Same. |
 
-## 10.10 Is this overblown? An honest take
+## 10.11 Is this overblown? An honest take
 
 **You are not overblowing it.** Two separate concerns deserve separate weights:
 
@@ -213,7 +272,7 @@ In short: **this is a real risk, not a theoretical one**, and the bidirectional 
 - **Idempotence of the user's operation** — if retrying is safe, the SDK can paper over drops. Bidirectional flows are often *not* idempotent.
 - **User expectations** — a cross-chain "execute operation" primitive that silently fails 0.1% of the time is very different from one that guarantees delivery.
 
-## 10.11 SDK-level mitigations (what integrators should do)
+## 10.12 SDK-level mitigations (what integrators should do)
 
 1. **Always apply a client-side timeout.** Don't rely on the network to signal failure.
 2. **Retry with the same parameters** for idempotent requests — `request_id` is deterministic, and the backlog replaces on insert ([stream/ops.rs:263-282](../../chain-signatures/node/src/stream/ops.rs#L263-L282)). A retry will typically land with a different proposer.
@@ -224,7 +283,7 @@ In short: **this is a real risk, not a theoretical one**, and the bidirectional 
 7. **Treat Solana sign requests as the highest-risk flow for delivery loss.** The Solana indexer has no persistence and no catchup ([§10.6](#106-indexer-delivery-guarantees--what-survives-a-crash)). A brief node outage can drop requests outright. Build in aggressive client-side timeouts and retries for Solana-originated traffic.
 8. **Verify Redis persistence before production.** Confirm with the operator / infra team that each node's Redis is configured with AOF or RDB persistence — otherwise a Redis restart wipes triples, presignatures, backlog, and indexer checkpoints for that node ([§10.8](#108-redis-as-single-point-of-failure)). Unpersisted Redis in prod would materially increase drop rates.
 
-## 10.12 Possible in-network fixes (what would resolve this)
+## 10.13 Possible in-network fixes (what would resolve this)
 
 These are observations, not proposals — but they frame the risk's severity by showing what *could* be done.
 
@@ -237,7 +296,7 @@ These are observations, not proposals — but they frame the risk's severity by 
 - **Cross-chain two-phase commit for bidirectional.** Hard — classic distributed systems problem. Probably out of scope; the realistic alternative is stronger client-side reconciliation tooling.
 - **Economic incentives.** Staking + slashing would align operator behaviour with user interests. Large design change; also introduces its own failure modes (griefing, nothing-at-stake).
 
-## 10.13 What this means for your onboarding-guide work
+## 10.14 What this means for your onboarding-guide work
 
 When you write SDK docs:
 

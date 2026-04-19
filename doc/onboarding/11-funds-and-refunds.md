@@ -4,7 +4,7 @@
 
 ---
 
-> Who pays, who holds the money while a request is in flight, and who gets a refund (or doesn't) on each outcome. Consolidates material otherwise scattered across [§1](01-tldr.md), [§4.3](04-event-flow.md#43-request-validation--what-gates-a-request-before-nodes-participate), and [§10.9](10-potential-risks.md#109-what-happens-to-the-users-deposit-on-failure).
+> Who pays, who holds the money while a request is in flight, and who gets a refund (or doesn't) on each outcome. Consolidates material otherwise scattered across [§1](01-tldr.md), [§4.3](04-event-flow.md#43-request-validation--what-gates-a-request-before-nodes-participate), and [§10.10](10-potential-risks.md#1010-what-happens-to-the-users-deposit-on-failure).
 
 ## 11.1 Summary
 
@@ -88,7 +88,7 @@ If that inference is correct, the economic picture of a bidirectional flow is:
 - MPC node operators absorb all destination-chain gas.
 - On failure, MPC node operators still pay whatever destination-chain gas was consumed even if the destination tx reverted.
 
-This is a significant liability for node operators and not sustainable at scale. An SDK that makes heavy use of bidirectional today is effectively being subsidised by the node operators. **Confirm this with the operator team before building any high-volume bidirectional integration** — it may be the reason bidirectional is currently flagged as experimental.
+This is a significant liability for node operators and not sustainable at scale. An SDK that makes heavy use of bidirectional today is effectively being subsidised by the node operators. **Confirm this with the operator team before building any high-volume bidirectional integration** — it may be the reason bidirectional is currently flagged as experimental. Note also that this is a separate concern from the "responses don't invoke the caller contract" gap in [§10.9](10-potential-risks.md#109-bidirectional-responses-dont-actually-invoke-the-caller); they stack on the same flow but are independent design issues.
 
 ## 11.7 What a coherent fee/refund model might look like
 
