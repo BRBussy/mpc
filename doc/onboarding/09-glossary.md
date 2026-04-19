@@ -1,6 +1,6 @@
 # §9 — Glossary
 
-[← §8 Experiments](08-experiments.md) · [Index](README.md)
+[← §8 Experiments](08-experiments.md) · [Index](README.md) · Next: [§10 Potential risks →](10-potential-risks.md)
 
 ---
 
@@ -33,4 +33,4 @@
 
 ---
 
-[← §8 Experiments](08-experiments.md) · [Index](README.md)
+[← §8 Experiments](08-experiments.md) · [Index](README.md) · Next: [§10 Potential risks →](10-potential-risks.md)

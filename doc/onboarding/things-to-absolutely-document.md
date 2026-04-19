@@ -1,0 +1,1 @@
+- The closest thing to a "direct call" is bringing up the NEAR sandbox and calling the MPC contract there, since NEAR uses Promise yield/resume and returns the signature as a normal function result — see §6.7.

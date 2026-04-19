@@ -21,6 +21,7 @@ Skim [§1 TL;DR](01-tldr.md) and [§2 Architecture](02-architecture.md) first. W
 7. [Extending to a new chain](07-extending-chains.md) — pointers only, for later.
 8. [Experiments](08-experiments.md) — 8 structured experiments (3 reading, 5 hands-on).
 9. [Glossary](09-glossary.md) — terms whose meaning in this codebase differs from public usage.
+10. [Potential risks](10-potential-risks.md) — liveness, delivery guarantees, and the proposer-single-point-of-failure. Mandatory reading before writing SDK contracts with user funds.
 
 ## Further reading in this repo
 

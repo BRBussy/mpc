@@ -97,24 +97,34 @@ sequenceDiagram
     autonumber
     participant U as User / SDK
     participant OC as Origin contract<br/>(Solana / Hydration)
-    participant IDX as Indexer<br/>(in MPC node)
+    participant OIDX as Origin-chain indexer<br/>(MPC node)
     participant NET as MPC network
     participant PR as Proposer node
     participant DC as Destination chain<br/>(any secp256k1 chain)
+    participant DIDX as Destination-chain indexer<br/>(MPC node)
 
-    U->>OC: sign_bidirectional(serialized_tx,<br/>caip2_id, program_id, ...)<br/>+ deposit
+    U->>OC: sign_bidirectional(serialized_tx,<br/>caip2_id, program_id, ...) + deposit
     OC->>OC: emit SignBidirectionalRequested
-    IDX->>NET: enqueue (kind = Bidirectional)
-    NET->>NET: threshold ECDSA<br/>signs serialized_tx
-    PR->>DC: broadcast signed tx<br/>(to caip2_id chain)
+    OIDX->>NET: enqueue (kind = SignBidirectional)
+    NET->>NET: threshold ECDSA round 1<br/>signs serialized_tx
+    PR->>DC: broadcast signed tx
     DC->>DC: execute
-    DC-->>PR: execution result -> serialized_output
+    DIDX->>DIDX: observe tx,<br/>extract serialized_output
+    DIDX->>NET: emit ExecutionConfirmed<br/>(tx_id, sign_id, output)
+    NET->>NET: threshold ECDSA round 2<br/>signs (request_id, output)
     PR->>OC: respond_bidirectional(request_id,<br/>serialized_output, signature)
     OC->>OC: emit RespondBidirectionalEvent
     OC-->>U: (optional) CPI callback<br/>to program_id [UNVERIFIED]
 ```
 
-Source of truth: [contract-sol/src/lib.rs:90-119](../../chain-signatures/contract-sol/src/lib.rs#L90-L119) and [respond_bidirectional.rs](../../chain-signatures/node/src/respond_bidirectional.rs) + [sign_bidirectional.rs](../../chain-signatures/node/src/sign_bidirectional.rs). The `caip2_id` parameter is what makes this cross-chain: it tells the MPC network **which** destination chain to broadcast to. The `program_id` (Solana) is the contract to call back on the origin once the destination result is in — exact CPI invocation is `[UNVERIFIED]` (I didn't trace the final dispatch).
+Two things that are easy to miss:
+
+1. **Two separate threshold-signing rounds.** Round 1 signs the destination-chain tx; round 2 signs `(request_id, serialized_output)` so the origin contract can verify that the output really came from the network, not an attacker calling `respond_bidirectional` with forged bytes. See [respond_bidirectional.rs:86-128](../../chain-signatures/node/src/respond_bidirectional.rs#L86-L128) — the output is packaged as a fresh `IndexedSignRequest` with `kind = RespondBidirectional` and routed back through the sign queue.
+2. **The destination-chain indexer is a required participant.** The proposer does *not* wait synchronously on the broadcast — it broadcasts, then a destination-chain indexer (running on some MPC node) detects the included tx and emits `ChainEvent::ExecutionConfirmed` ([indexer_eth/mod.rs:1102](../../chain-signatures/node/src/indexer_eth/mod.rs#L1102), [stream/mod.rs:41](../../chain-signatures/node/src/stream/mod.rs#L41)). If that indexer misses the tx, the flow stalls even though the destination tx executed successfully.
+
+Source of truth: [contract-sol/src/lib.rs:90-119](../../chain-signatures/contract-sol/src/lib.rs#L90-L119), [respond_bidirectional.rs](../../chain-signatures/node/src/respond_bidirectional.rs), [sign_bidirectional.rs](../../chain-signatures/node/src/sign_bidirectional.rs). The `caip2_id` parameter tells the network which destination chain to broadcast to. The `program_id` (Solana) is the contract to CPI-call back on the origin once the result is in — exact CPI dispatch is `[UNVERIFIED]`.
+
+**Liveness implications of this flow are significant — see [§10 Potential risks](10-potential-risks.md).**
 
 ### What's out of scope in these diagrams
 
